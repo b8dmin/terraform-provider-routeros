@@ -35,6 +35,8 @@ func TestAccInterfaceWirelessSecurityProfilesTest_basic(t *testing.T) {
 							resource.TestCheckResourceAttr(testInterfaceWirelessSecurityProfiles, "mode", "dynamic-keys"),
 							resource.TestCheckResourceAttr(testInterfaceWirelessSecurityProfiles, "wpa_pre_shared_key", "wpa_psk_key"),
 							resource.TestCheckResourceAttr(testInterfaceWirelessSecurityProfiles, "wpa2_pre_shared_key", "wpa2_psk_key"),
+							resource.TestCheckNoResourceAttr(testInterfaceWirelessSecurityProfiles, "wpa_pre_shared_key_wo"),
+							resource.TestCheckNoResourceAttr(testInterfaceWirelessSecurityProfiles, "wpa2_pre_shared_key_wo"),
 						),
 					},
 				},

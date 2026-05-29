@@ -1,6 +1,9 @@
 package routeros
 
 import (
+	"context"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 )
@@ -49,11 +52,93 @@ import (
   }
 */
 
+// wirelessSecurityProfileWoPairs lists (regular, write-only) field name pairs.
+// The _wo variants accept ephemeral values (Terraform ≥ 1.10) and are never
+// stored in state. When a _wo field is set it takes precedence and its value
+// is forwarded to RouterOS under the same API key as the regular field.
+var wirelessSecurityProfileWoPairs = []struct{ regular, wo string }{
+	{"management_protection_key", "management_protection_key_wo"},
+	{"mschapv2_password", "mschapv2_password_wo"},
+	{"static_key_0", "static_key_0_wo"},
+	{"static_key_1", "static_key_1_wo"},
+	{"static_key_2", "static_key_2_wo"},
+	{"static_key_3", "static_key_3_wo"},
+	{"static_sta_private_key", "static_sta_private_key_wo"},
+	{"wpa_pre_shared_key", "wpa_pre_shared_key_wo"},
+	{"wpa2_pre_shared_key", "wpa2_pre_shared_key_wo"},
+}
+
+// wirelessSecurityProfileMergeWo copies every set _wo value into its
+// corresponding regular field so that TerraformResourceDataToMikrotik picks
+// it up under the correct RouterOS API key name.
+func wirelessSecurityProfileMergeWo(d *schema.ResourceData) {
+	// Read _wo values from rawConfig rather than d.GetOk: during Update the SDK
+	// does not surface WriteOnly attribute config values through GetOk (planned
+	// state for WriteOnly is always null), so rawConfig is the reliable source.
+	rawConfig := d.GetRawConfig()
+	if !rawConfig.IsKnown() || rawConfig.IsNull() {
+		return
+	}
+	attrTypes := rawConfig.Type().AttributeTypes()
+	for _, p := range wirelessSecurityProfileWoPairs {
+		if _, exists := attrTypes[p.wo]; !exists {
+			continue
+		}
+		woVal := rawConfig.GetAttr(p.wo)
+		if woVal.IsNull() || !woVal.IsKnown() {
+			continue
+		}
+		d.Set(p.regular, woVal.AsString())
+	}
+}
+
+// wirelessSecurityProfileClearIfAbsentFromConfig removes regular sensitive
+// fields from state when the practitioner has not configured them (i.e. they
+// are using the _wo variant or the field is simply not needed). This prevents
+// the RouterOS-returned value from leaking into state and causing perpetual
+// diffs on the next plan.
+//
+// The function is a no-op when rawConfig is unavailable (import, refresh
+// without a plan) so that imported state is fully populated.
+func wirelessSecurityProfileClearIfAbsentFromConfig(d *schema.ResourceData) {
+	rawConfig := d.GetRawConfig()
+	if !rawConfig.IsKnown() || rawConfig.IsNull() {
+		return
+	}
+	if !rawConfig.Type().IsObjectType() {
+		return
+	}
+	attrTypes := rawConfig.Type().AttributeTypes()
+	for _, p := range wirelessSecurityProfileWoPairs {
+		if _, exists := attrTypes[p.regular]; !exists {
+			continue
+		}
+		if rawConfig.GetAttr(p.regular).IsNull() {
+			d.Set(p.regular, nil)
+		}
+	}
+}
+
 // https://help.mikrotik.com/docs/display/ROS/Wireless+Interface#WirelessInterface-SecurityProfiles
 func ResourceInterfaceWirelessSecurityProfiles() *schema.Resource {
 	resSchema := map[string]*schema.Schema{
 		MetaResourcePath: PropResourcePath("/interface/wireless/security-profiles"),
 		MetaId:           PropId(Id),
+
+		// _wo fields are skipped in both read (RouterOS never returns them) and
+		// write (their value is forwarded via the regular field in the custom
+		// Create/Update context).
+		MetaSkipFields: PropSkipFields(
+			"management_protection_key_wo",
+			"mschapv2_password_wo",
+			"static_key_0_wo",
+			"static_key_1_wo",
+			"static_key_2_wo",
+			"static_key_3_wo",
+			"static_sta_private_key_wo",
+			"wpa_pre_shared_key_wo",
+			"wpa2_pre_shared_key_wo",
+		),
 
 		"authentication_types": {
 			Type:     schema.TypeSet,
@@ -129,12 +214,23 @@ func ResourceInterfaceWirelessSecurityProfiles() *schema.Resource {
 			DiffSuppressFunc: AlwaysPresentNotUserProvided,
 		},
 		"management_protection_key": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"management_protection_key_wo"},
 			Description: "Management protection shared secret. When interface is in AP mode, default management " +
 				"protection key (configured in security-profile) can be overridden by key specified in access-list or " +
 				"RADIUS attribute.",
+		},
+		"management_protection_key_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"management_protection_key"},
+			Description: "Write-only alternative to `management_protection_key` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). The value is forwarded to RouterOS but never stored in state. " +
+				"Cannot be used together with `management_protection_key`.",
 		},
 		"mode": {
 			Type:     schema.TypeString,
@@ -150,10 +246,22 @@ func ResourceInterfaceWirelessSecurityProfiles() *schema.Resource {
 			DiffSuppressFunc: AlwaysPresentNotUserProvided,
 		},
 		"mschapv2_password": {
-			Type:     schema.TypeString,
-			Optional: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"mschapv2_password_wo"},
 			Description: "Password to use for authentication when `eap-ttls-mschapv2` or `peap` authentication method is " +
 				"being used. This property only has effect on Stations.",
+		},
+		"mschapv2_password_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"mschapv2_password"},
+			Description: "Write-only alternative to `mschapv2_password` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). The value is forwarded to RouterOS but never stored in state. " +
+				"Cannot be used together with `mschapv2_password`.",
 		},
 		"mschapv2_username": {
 			Type:     schema.TypeString,
@@ -240,32 +348,72 @@ func ResourceInterfaceWirelessSecurityProfiles() *schema.Resource {
 			DiffSuppressFunc: AlwaysPresentNotUserProvided,
 		},
 		"static_key_0": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"static_key_0_wo"},
 			Description: "Hexadecimal representation of the key. Length of key must be appropriate for selected algorithm. " +
 				"See the Statically configured WEP keys section.",
+		},
+		"static_key_0_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"static_key_0"},
+			Description: "Write-only alternative to `static_key_0` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). Cannot be used together with `static_key_0`.",
 		},
 		"static_key_1": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"static_key_1_wo"},
 			Description: "Hexadecimal representation of the key. Length of key must be appropriate for selected algorithm. " +
 				"See the Statically configured WEP keys section.",
+		},
+		"static_key_1_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"static_key_1"},
+			Description: "Write-only alternative to `static_key_1` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). Cannot be used together with `static_key_1`.",
 		},
 		"static_key_2": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"static_key_2_wo"},
 			Description: "Hexadecimal representation of the key. Length of key must be appropriate for selected algorithm. " +
 				"See the Statically configured WEP keys section.",
 		},
+		"static_key_2_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"static_key_2"},
+			Description: "Write-only alternative to `static_key_2` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). Cannot be used together with `static_key_2`.",
+		},
 		"static_key_3": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"static_key_3_wo"},
 			Description: "Hexadecimal representation of the key. Length of key must be appropriate for selected algorithm. " +
 				"See the Statically configured WEP keys section.",
+		},
+		"static_key_3_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"static_key_3"},
+			Description: "Write-only alternative to `static_key_3` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). Cannot be used together with `static_key_3`.",
 		},
 		"static_sta_private_algo": {
 			Type:     schema.TypeString,
@@ -278,12 +426,22 @@ func ResourceInterfaceWirelessSecurityProfiles() *schema.Resource {
 			DiffSuppressFunc: AlwaysPresentNotUserProvided,
 		},
 		"static_sta_private_key": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"static_sta_private_key_wo"},
 			Description: "Length of key must be appropriate for selected algorithm, see the Statically configured WEP " +
 				"keys section. This property is used only on Stations. Access Point uses corresponding key either from " +
 				"private-key property, or from Mikrotik-Wireless-Enc-Key attribute.",
+		},
+		"static_sta_private_key_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"static_sta_private_key"},
+			Description: "Write-only alternative to `static_sta_private_key` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). Cannot be used together with `static_sta_private_key`.",
 		},
 		"static_transmit_key": {
 			Type:     schema.TypeString,
@@ -341,29 +499,84 @@ func ResourceInterfaceWirelessSecurityProfiles() *schema.Resource {
 			DiffSuppressFunc: AlwaysPresentNotUserProvided,
 		},
 		"wpa_pre_shared_key": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"wpa_pre_shared_key_wo"},
 			Description: "`WPA` pre-shared key mode requires all devices in a BSS to have common secret key. Value of " +
 				"this key can be an arbitrary text. Commonly referred to as the network password for WPA mode. property " +
 				"only has effect when wpa-psk is added to authentication-types.",
 			ValidateFunc: validation.StringLenBetween(8, 64),
 		},
+		"wpa_pre_shared_key_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"wpa_pre_shared_key"},
+			Description: "Write-only alternative to `wpa_pre_shared_key` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). The value is forwarded to RouterOS but never stored in state. " +
+				"Cannot be used together with `wpa_pre_shared_key`.",
+			ValidateFunc: validation.StringLenBetween(8, 64),
+		},
 		"wpa2_pre_shared_key": {
-			Type:      schema.TypeString,
-			Optional:  true,
-			Sensitive: true,
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			ConflictsWith: []string{"wpa2_pre_shared_key_wo"},
 			Description: "`WPA2` pre-shared key mode requires all devices in a BSS to have common secret key. Value of " +
 				"this key can be an arbitrary text. Commonly referred to as the network password for WPA2 mode. property " +
 				"only has effect when wpa2-psk is added to authentication-types.",
 			ValidateFunc: validation.StringLenBetween(8, 64),
 		},
+		"wpa2_pre_shared_key_wo": {
+			Type:          schema.TypeString,
+			Optional:      true,
+			Sensitive:     true,
+			WriteOnly:     true,
+			ConflictsWith: []string{"wpa2_pre_shared_key"},
+			Description: "Write-only alternative to `wpa2_pre_shared_key` for use with ephemeral values " +
+				"(requires Terraform ≥ 1.10). The value is forwarded to RouterOS but never stored in state. " +
+				"Cannot be used together with `wpa2_pre_shared_key`.",
+			ValidateFunc: validation.StringLenBetween(8, 64),
+		},
 	}
 
 	return &schema.Resource{
-		CreateContext: DefaultCreate(resSchema),
-		ReadContext:   DefaultRead(resSchema),
-		UpdateContext: DefaultUpdate(resSchema),
+		CreateContext: func(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+			wirelessSecurityProfileMergeWo(d)
+			diags := ResourceCreate(ctx, resSchema, d, m)
+			wirelessSecurityProfileClearIfAbsentFromConfig(d)
+			return diags
+		},
+		ReadContext: func(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+			// Snapshot which regular fields are null in the prior state BEFORE
+			// reading from RouterOS. If a field was null it means the resource
+			// is managed via the _wo variant — we must restore null afterwards
+			// so the RouterOS-returned value does not leak into state and cause
+			// a perpetual diff on the next plan.
+			// (rawConfig is unavailable during the refresh phase of terraform
+			// plan, so we rely on prior-state nullness instead of rawConfig.)
+			nullInPrior := make(map[string]bool, len(wirelessSecurityProfileWoPairs))
+			for _, p := range wirelessSecurityProfileWoPairs {
+				nullInPrior[p.regular] = d.Get(p.regular).(string) == ""
+			}
+
+			diags := ResourceRead(ctx, resSchema, d, m)
+
+			for _, p := range wirelessSecurityProfileWoPairs {
+				if nullInPrior[p.regular] {
+					d.Set(p.regular, nil)
+				}
+			}
+			return diags
+		},
+		UpdateContext: func(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+			wirelessSecurityProfileMergeWo(d)
+			diags := ResourceUpdate(ctx, resSchema, d, m)
+			wirelessSecurityProfileClearIfAbsentFromConfig(d)
+			return diags
+		},
 		DeleteContext: DefaultDelete(resSchema),
 
 		Importer: &schema.ResourceImporter{
