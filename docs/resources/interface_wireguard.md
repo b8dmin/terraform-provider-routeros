@@ -25,6 +25,7 @@ resource "routeros_interface_wireguard" "test_wg_interface" {
 - `disabled` (Boolean)
 - `mtu` (String) Layer3 Maximum transmission unit ('auto', 0 .. 65535). Look for the exact minimum value in the MikroTik documentation
 - `private_key` (String, Sensitive) A base64 private key. If not specified, it will be automatically generated upon interface creation.
+- `private_key_wo` (String, Write-only, Sensitive) Write-only alternative to `private_key` for use with ephemeral values (requires Terraform ≥ 1.10). The value is forwarded to RouterOS but never stored in state. Cannot be used together with `private_key`.
 
 ### Read-Only
 

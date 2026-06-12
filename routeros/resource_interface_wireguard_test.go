@@ -24,6 +24,7 @@ func TestAccInterfaceWireguardTest_basic(t *testing.T) {
 						Check: resource.ComposeTestCheckFunc(
 							testResourcePrimaryInstanceId(testInterfaceWireguardAddress),
 							resource.TestCheckResourceAttr(testInterfaceWireguardAddress, "listen_port", "13231"),
+							resource.TestCheckNoResourceAttr(testInterfaceWireguardAddress, "private_key_wo"),
 						),
 					},
 				},
